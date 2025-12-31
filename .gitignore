@@ -55,3 +55,5 @@ nunit-*.xml
 /lanmessenger.local-key.pem
 /lanmessenger.local.pem
 /lanmessenger.local.pfx
+/.vs
+/Properties/PublishProfiles
