@@ -1,0 +1,397 @@
+﻿@page
+@model LanMessenger.Pages.Admin.IndexModel
+@{
+    ViewData["Title"] = "Admin";
+}
+
+<style>
+    .wrap { max-width: 980px; margin: 0 auto; padding: 1rem; }
+    .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 1rem; flex: 1; min-width: 320px; }
+    .muted { color: #666; font-size: 0.95rem; }
+    .stack > * { margin-bottom: .75rem; }
+    label { display:block; font-weight: 600; margin-bottom: .25rem; }
+    input { width: 100%; padding: .55rem .6rem; border-radius: 10px; border: 1px solid #ccc; }
+    button { padding: .55rem .8rem; border-radius: 10px; border: 1px solid #333; background: #111; color: #fff; cursor: pointer; }
+    button.secondary { background: #fff; color: #111; border-color: #ccc; }
+    button.danger { background: #b00020; border-color: #b00020; }
+    .inline { display:flex; gap:.5rem; align-items:center; }
+    .inline > * { flex: 1; }
+    .inline .tight { flex: 0; white-space: nowrap; }
+    ul { padding-left: 1.2rem; }
+    code { background: #f6f6f6; padding: .1rem .35rem; border-radius: 6px; }
+    .status { padding: .6rem .8rem; border-radius: 10px; background: #f6f6f6; border: 1px solid #e5e5e5; }
+    .ok { border-color: #7bd88f; background: #f0fff4; }
+    .bad { border-color: #ffb3b3; background: #fff5f5; }
+</style>
+
+<div class="wrap">
+    <h2>Admin</h2>
+    <p class="muted">
+        Manage device keys for uploads. The Admin Key is stored in <code>sessionStorage</code> and clears when you close the browser.
+    </p>
+
+    <div class="row">
+        <div class="card">
+            <h3>Admin Key</h3>
+            <div class="stack">
+                <div>
+                    <label for="adminKey">Admin Key</label>
+                    <input id="adminKey" type="password" placeholder="Paste Admin Key (X-Admin-Key)" />
+                    <div class="muted" style="margin-top:.35rem;">
+                        Tip: You can keep the key in appsettings.Production.json on the host only.
+                    </div>
+                </div>
+
+                <div class="inline">
+                    <button class="tight" id="saveKeyBtn">Save (Session)</button>
+                    <button class="secondary tight" id="clearKeyBtn">Clear</button>
+                    <button class="secondary tight" id="testBtn">Test / Refresh</button>
+                </div>
+
+                <div id="status" class="status">Status: not connected</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Add / Replace Device</h3>
+            <div class="stack">
+                <div>
+                    <label for="deviceId">Device ID</label>
+                    <input id="deviceId" placeholder="e.g., PREST-DESKTOP, LAPTOP, SHOP-PI" />
+                </div>
+
+                <div>
+                    <label for="deviceKey">Device Key</label>
+                    <input id="deviceKey" placeholder="Generate or paste a key" />
+                    <div class="muted" style="margin-top:.35rem;">
+                        This is the secret the device will send as <code>X-Device-Key</code>.
+                    </div>
+                </div>
+
+                <div class="inline">
+                    <button class="secondary tight" id="genKeyBtn">Generate Key</button>
+                    <button class="tight" id="addBtn">Add / Replace</button>
+                </div>
+
+                <div class="muted">
+                    Client uploads must include headers:
+                    <code>X-Device-Id</code> and <code>X-Device-Key</code>
+                </div>
+
+                <div>
+                    <label for="clientSnippet">Client snippet</label>
+                    <textarea id="clientSnippet" rows="5" style="width:100%; padding:.55rem .6rem; border-radius:10px; border:1px solid #ccc; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;"></textarea>
+                    <div class="muted" style="margin-top:.35rem;">
+                        Paste this into PowerShell on the client machine to test upload auth.
+                    </div>
+                </div>
+
+                <div class="inline">
+                    <button class="secondary tight" id="buildSnippetBtn">Build Snippet</button>
+                    <button class="secondary tight" id="copySnippetBtn">Copy</button>
+                    <button class="tight" id="copyPacketBtn">Copy Onboarding Packet</button>
+                </div>
+
+
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:1rem;">
+        <h3>Registered Devices</h3>
+        <div class="inline" style="margin-bottom:.75rem;">
+            <button class="secondary tight" id="refreshBtn">Refresh</button>
+            <div class="muted">Click a device to revoke it.</div>
+        </div>
+
+        <ul id="deviceList"></ul>
+    </div>
+</div>
+
+<script>
+    (() => {
+        const adminKeyInput = document.getElementById("adminKey");
+        const statusEl = document.getElementById("status");
+        const deviceList = document.getElementById("deviceList");
+
+        const deviceIdEl = document.getElementById("deviceId");
+        const deviceKeyEl = document.getElementById("deviceKey");
+
+        const saveKeyBtn = document.getElementById("saveKeyBtn");
+        const clearKeyBtn = document.getElementById("clearKeyBtn");
+        const testBtn = document.getElementById("testBtn");
+
+        const genKeyBtn = document.getElementById("genKeyBtn");
+        const addBtn = document.getElementById("addBtn");
+        const refreshBtn = document.getElementById("refreshBtn");
+
+        const clientSnippetEl = document.getElementById("clientSnippet");
+        const buildSnippetBtn = document.getElementById("buildSnippetBtn");
+        const copySnippetBtn = document.getElementById("copySnippetBtn");
+        const copyPacketBtn = document.getElementById("copyPacketBtn");
+
+        const KEY_NAME = "LanMessenger.AdminKey";
+
+        function setStatus(text, ok = null) {
+            statusEl.textContent = text;
+            statusEl.classList.remove("ok", "bad");
+            if (ok === true) statusEl.classList.add("ok");
+            if (ok === false) statusEl.classList.add("bad");
+        }
+
+        function loadAdminKey() {
+            const k = sessionStorage.getItem(KEY_NAME) || "";
+            adminKeyInput.value = k;
+            return k;
+        }
+
+        function saveAdminKey() {
+            const k = adminKeyInput.value.trim();
+            sessionStorage.setItem(KEY_NAME, k);
+            return k;
+        }
+
+        function clearAdminKey() {
+            sessionStorage.removeItem(KEY_NAME);
+            adminKeyInput.value = "";
+        }
+
+        function generateKey() {
+            // 32 bytes => base64 ~44 chars
+            const bytes = new Uint8Array(32);
+            crypto.getRandomValues(bytes);
+            // base64
+            let bin = "";
+            bytes.forEach(b => bin += String.fromCharCode(b));
+            return btoa(bin);
+        }
+
+        async function apiGetDevices(adminKey) {
+            const res = await fetch("/admin/devices", {
+                method: "GET",
+                headers: { "X-Admin-Key": adminKey }
+            });
+            if (!res.ok) throw new Error(`GET /admin/devices failed (${res.status})`);
+            return await res.json();
+        }
+
+        async function apiPostDevice(adminKey, payload) {
+            const res = await fetch("/admin/devices", {
+                method: "POST",
+                headers: {
+                    "X-Admin-Key": adminKey,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(payload)
+            });
+            const text = await res.text();
+            if (!res.ok) throw new Error(`POST /admin/devices failed (${res.status}): ${text}`);
+            return text ? JSON.parse(text) : {};
+        }
+
+        function renderDevices(devices) {
+            deviceList.innerHTML = "";
+            if (!devices || devices.length === 0) {
+                const li = document.createElement("li");
+                li.textContent = "(none)";
+                deviceList.appendChild(li);
+                return;
+            }
+
+            devices.forEach(id => {
+                const li = document.createElement("li");
+                li.style.marginBottom = ".35rem";
+
+                const row = document.createElement("div");
+                row.className = "inline";
+                row.style.justifyContent = "space-between";
+
+                const left = document.createElement("div");
+                left.textContent = id;
+
+                const revokeBtn = document.createElement("button");
+                revokeBtn.className = "danger tight";
+                revokeBtn.textContent = "Revoke";
+                revokeBtn.addEventListener("click", async () => {
+                    const adminKey = sessionStorage.getItem(KEY_NAME) || "";
+                    if (!adminKey) return setStatus("Missing Admin Key.", false);
+
+                    if (!confirm(`Revoke device "${id}"?`)) return;
+
+                    try {
+                        await apiPostDevice(adminKey, { action: "revoke", deviceId: id });
+                        setStatus(`Revoked: ${id}`, true);
+                        await refresh();
+                    } catch (e) {
+                        setStatus(e.message, false);
+                    }
+                });
+
+                row.appendChild(left);
+                row.appendChild(revokeBtn);
+                li.appendChild(row);
+                deviceList.appendChild(li);
+            });
+        }
+
+        async function refresh() {
+            const adminKey = sessionStorage.getItem(KEY_NAME) || "";
+            if (!adminKey) {
+                renderDevices([]);
+                setStatus("Status: missing Admin Key", false);
+                return;
+            }
+
+            try {
+                setStatus("Loading devices...", null);
+                const data = await apiGetDevices(adminKey);
+                renderDevices(data.devices || []);
+                setStatus("Connected. Devices loaded.", true);
+            } catch (e) {
+                renderDevices([]);
+                setStatus(e.message, false);
+            }
+        }
+
+            function buildOnboardingPacket() {
+      const host = location.origin;
+      const deviceId = deviceIdEl.value.trim();
+      const deviceKey = deviceKeyEl.value.trim();
+
+      if (!deviceId || !deviceKey) {
+        setStatus("Device ID and Device Key are required to build an onboarding packet.", false);
+        return "";
+      }
+
+      return `LanMessenger Device Onboarding
+    ===========================
+    Host:     ${host}
+    DeviceId: ${deviceId}
+    DeviceKey: ${deviceKey}
+
+    Client steps:
+    1) Open LanMessenger in browser
+    2) Paste DeviceKey into the Device Key field
+    3) Upload a file to verify
+
+    Quick test (PowerShell):
+    -----------------------
+    $deviceId = "${deviceId}"
+    $deviceKey = "${deviceKey}"
+
+    "hello from $env:COMPUTERNAME" | Out-File .\\lan_test.txt -Encoding utf8
+
+    curl "${host}/upload" -Method Post -Form @@{
+      sender = "$env:COMPUTERNAME"
+      file   = Get-Item .\\lan_test.txt
+    } -Headers @@{
+      "X-Device-Id"  = $deviceId
+      "X-Device-Key" = $deviceKey
+    } -UseBasicParsing -Verbose
+    `;
+    }
+
+    copyPacketBtn.addEventListener("click", async () => {
+      const packet = buildOnboardingPacket();
+      if (!packet) return;
+
+      try {
+        await navigator.clipboard.writeText(packet);
+        setStatus("Copied onboarding packet to clipboard.", true);
+      } catch {
+        setStatus("Clipboard copy failed. Select + copy manually.", false);
+        clientSnippetEl.value = packet; // fallback: put it in the box
+      }
+    });
+
+
+        // Wire up buttons
+        saveKeyBtn.addEventListener("click", async () => {
+            saveAdminKey();
+            await refresh();
+        });
+
+        clearKeyBtn.addEventListener("click", () => {
+            clearAdminKey();
+            renderDevices([]);
+            setStatus("Status: not connected", null);
+        });
+
+        testBtn.addEventListener("click", refresh);
+        refreshBtn.addEventListener("click", refresh);
+
+        genKeyBtn.addEventListener("click", () => {
+            deviceKeyEl.value = generateKey();
+        });
+
+        addBtn.addEventListener("click", async () => {
+            const adminKey = sessionStorage.getItem(KEY_NAME) || "";
+            if (!adminKey) return setStatus("Missing Admin Key.", false);
+
+            const deviceId = deviceIdEl.value.trim();
+            const deviceKey = deviceKeyEl.value.trim();
+
+            if (!deviceId || !deviceKey) {
+                setStatus("Device ID and Device Key are required.", false);
+                return;
+            }
+
+            try {
+                await apiPostDevice(adminKey, { action: "add", deviceId, deviceKey });
+                buildClientSnippet();
+                setStatus(`Added/updated device: ${deviceId}`, true);
+                deviceKeyEl.value = "";
+                await refresh();
+            } catch (e) {
+                setStatus(e.message, false);
+            }
+
+        });
+
+        function buildClientSnippet() {
+            const host = location.origin; // ensures correct host/port
+            const deviceId = deviceIdEl.value.trim();
+            const deviceKey = deviceKeyEl.value.trim();
+
+            if (!deviceId || !deviceKey) {
+            setStatus("Device ID and Device Key are required to build a snippet.", false);
+            return;
+            }
+
+                const snippet = `# LanMessenger client test (run on client machine)
+                    $deviceId = "${deviceId}"
+                    $deviceKey = "${deviceKey}"
+
+                    "hello from $env:COMPUTERNAME" | Out-File .\\lan_test.txt -Encoding utf8
+
+                    curl "${host}/upload" -Method Post -Form @@{
+                      sender = "$env:COMPUTERNAME"
+                      file   = Get-Item .\\lan_test.txt
+                    } -Headers @@{
+                      "X-Device-Id"  = $deviceId
+                      "X-Device-Key" = $deviceKey
+                    } -UseBasicParsing -Verbose
+                    `;
+                clientSnippetEl.value = snippet;
+
+            setStatus("Client snippet built.", true);
+        }
+
+        buildSnippetBtn.addEventListener("click", buildClientSnippet);
+
+        copySnippetBtn.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(clientSnippetEl.value || "");
+            setStatus("Copied snippet to clipboard.", true);
+          } catch {
+            setStatus("Clipboard copy failed (browser permissions). Select + copy manually.", false);
+          }
+        });
+
+
+        // Init
+        loadAdminKey();        
+        refresh();
+    })();
+</script>

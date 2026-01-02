@@ -43,6 +43,23 @@
         </div>
     </div>
 </div>
+<div class="row g-2 mt-3">
+    <div class="col-md-4">
+        <input id="deviceId" class="form-control" placeholder="Device ID (auto)" readonly />
+    </div>
+    <div class="col-md-8">
+        <input id="deviceKey" class="form-control" placeholder="Device Key (from Admin)" />
+        <div class="text-muted small mt-1">
+            This device needs a key to upload. Get one from <a href="/Admin" target="_blank" rel="noopener">/Admin</a>.
+        </div>
+        <div class="col-md-2 d-grid">
+            <button id="saveDeviceBtn" class="btn btn-outline-primary">Save</button>
+        </div>
+        <div class="col-md-2 d-grid">
+            <button id="copyDeviceBtn" class="btn btn-outline-secondary">Copy ID</button>
+        </div>
+    </div>
+</div>
 
 <div class="row g-2 mt-2">
     <div class="col-md-8">
@@ -51,6 +68,11 @@
     <div class="col-md-4 d-grid">
         <button id="sendFile" class="btn btn-outline-secondary">Send File</button>
     </div>
+</div>
+
+<div id="uploadStatus" class="muted"></div>
+<div style="border:1px solid #ddd; border-radius:10px; overflow:hidden; height:14px; max-width:420px;">
+    <div id="uploadBar" style="height:14px; width:0%; background:#111;"></div>
 </div>
 
 
@@ -155,52 +177,32 @@
 <script>
     const fileEl = document.getElementById("file");
     const sendFileBtn = document.getElementById("sendFile");
+    const deviceIdEl = document.getElementById("deviceId");
+    const deviceKeyInputEl = document.getElementById("deviceKey");
+    const saveDeviceBtn = document.getElementById("saveDeviceBtn");
+    const copyDeviceBtn = document.getElementById("copyDeviceBtn");
 
-    async function sendFile() {
-      const f = fileEl.files[0];
-      if (!f) return;
-
-      const sender = (senderEl.value || "").trim() || "Unknown";
-
-      const fd = new FormData();
-      fd.append("sender", sender);
-      fd.append("file", f);
-      fd.append("uploadKey", localStorage.getItem("uploadKey") || "");
-
-      const res = await fetch("/upload", { 
-          method: "POST",
-          body: fd,
-             headers: {
-              "X-Device-Id": getDeviceId(),
-              "X-Device-Key": getDeviceKey()
-            }
-        });
-      if (!res.ok) {
-        alert("Upload failed.");
-        return;
-      }
-
-      const info = await res.json();
-
-      // Show it locally right away
-      appendMessage({
-        timestamp: new Date().toLocaleTimeString(),
-        sender: info.sender,
-        text: `📎 <a href="${info.url}" target="_blank" rel="noopener">${info.fileName}</a> (${Math.round(info.size/1024)} KB)`
-      });
-
-      // Optional: broadcast using SignalR (next section)
-      fileEl.value = "";
+    function randomHex(len) {
+      // len = number of hex chars
+      const bytes = new Uint8Array(Math.ceil(len / 2));
+      (window.crypto || window.msCrypto).getRandomValues(bytes);
+      return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("").slice(0, len).toUpperCase();
     }
 
-    sendFileBtn.addEventListener("click", sendFile);
-</script>
+    function safeUuid8() {
+      // Prefer randomUUID when available
+      if (window.crypto && typeof window.crypto.randomUUID === "function") {
+        return window.crypto.randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase();
+      }
+      // Fallback: 8 hex chars from crypto RNG
+      return randomHex(8);
+    }
 
-<script>
-        function getDeviceId() {
+    function getDeviceId() {
       let id = localStorage.getItem("deviceId");
       if (!id) {
-        id = (navigator.userAgent.includes("Windows") ? "WIN-" : "DEV-") + crypto.randomUUID().slice(0, 8).toUpperCase();
+        const prefix = navigator.userAgent.includes("Windows") ? "WIN-" : "DEV-";
+        id = prefix + safeUuid8();
         localStorage.setItem("deviceId", id);
       }
       return id;
@@ -210,5 +212,128 @@
       return localStorage.getItem("deviceKey") || "";
     }
 
+    function setDeviceKey(k) {
+      localStorage.setItem("deviceKey", (k || "").trim());
+    }
+
+    // initialize device id/key UI
+    deviceIdEl.value = getDeviceId();
+    deviceKeyInputEl.value = getDeviceKey();
+    deviceKeyInputEl.addEventListener("change", () => setDeviceKey(deviceKeyInputEl.value));
+
+    saveDeviceBtn.addEventListener("click", () => {
+      setDeviceKey(deviceKeyInputEl.value);
+      alert("Device Key saved.");
+    });
+
+    copyDeviceBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(deviceIdEl.value);
+        alert("Device ID copied.");
+      } catch {
+        deviceIdEl.select();
+        document.execCommand("copy");
+        alert("Device ID copied (fallback).");
+      }
+    });
+
+    function setUploadStatus(t) {
+      document.getElementById("uploadStatus").textContent = t || "";
+    }
+    function setUploadProgress(pct) {
+      document.getElementById("uploadBar").style.width = (pct || 0) + "%";
+    }
+
+    function formatBytes(bytes) {
+      const b = Number(bytes || 0);
+      if (b < 1024) return `${b} B`;
+      const kb = b / 1024;
+      if (kb < 1024) return `${kb.toFixed(1)} KB`;
+      const mb = kb / 1024;
+      if (mb < 1024) return `${mb.toFixed(1)} MB`;
+      const gb = mb / 1024;
+      return `${gb.toFixed(2)} GB`;
+    }
+
+    function uploadFileWithProgress(file, sender) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/upload");
+
+        // headers for per-device auth
+        xhr.setRequestHeader("X-Device-Id", getDeviceId());
+        xhr.setRequestHeader("X-Device-Key", getDeviceKey());
+
+        xhr.upload.onprogress = (e) => {
+          if (!e.lengthComputable) return;
+          const pct = Math.round((e.loaded / e.total) * 100);
+          setUploadStatus(`Uploading: ${pct}%`);
+          setUploadProgress(pct);
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText)); }
+            catch { reject(new Error("Upload succeeded but response JSON was invalid.")); }
+          } else {
+            reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error("Upload failed: network error"));
+
+        const form = new FormData();
+        form.append("sender", sender || "");
+        form.append("file", file);
+        xhr.send(form);
+      });
+    }
+
+    async function sendFile() {
+      const f = fileEl.files[0];
+      const deviceId = getDeviceId();
+      const deviceKey = getDeviceKey();
+
+      if (!f) return;
+
+      // onboarding guard
+        if (!deviceId || !deviceKey) {
+            alert("This device is not onboarded yet.\n\n1) Open /Admin on the host\n2) Add this Device ID: " + deviceId + "\n3) Paste the Device Key here.");
+            deviceKeyInputEl?.focus?.();
+            return;
+        }
+
+      const sender = (senderEl.value || "").trim() || "Unknown";
+
+      try {
+        setUploadStatus("Starting upload...");
+        setUploadProgress(0);
+
+        const info = await uploadFileWithProgress(f, sender);
+
+        // show locally (safe rendering)
+        appendFile({
+          timestamp: new Date().toLocaleTimeString(),
+          sender: info.sender || sender,
+          fileName: info.fileName,
+          url: info.url,
+          size: info.size
+        });
+
+        setUploadStatus(`Uploaded: ${info.fileName} (${formatBytes(info.size)})`);
+        setUploadProgress(100);
+
+        fileEl.value = "";
+        setTimeout(() => setUploadProgress(0), 800);
+      } catch (e) {
+        setUploadStatus(e.message || "Upload failed.");
+        setUploadProgress(0);
+        alert(e.message || "Upload failed.");
+      }
+    }
+
+    sendFileBtn.addEventListener("click", sendFile);
 </script>
+
+
 

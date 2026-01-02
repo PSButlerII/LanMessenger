@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.SignalR;
 using System.Net;
 using System.Security.Cryptography;
+using LanMessenger.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,6 +13,7 @@ builder.Services.AddSignalR();
 builder.Services.AddSingleton<MessageStore>();
 builder.Services.AddSingleton<DeviceAuthService>();
 //builder.Services.AddAuthentication();
+builder.Services.AddHostedService<RetentionService>();
 
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
 {
@@ -30,12 +32,20 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
 //    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
 //});
 
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
 var app = builder.Build();
 
-//app.UseForwardedHeaders(new ForwardedHeadersOptions
-//{
-//    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
-//});
+
+
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+});
 //app.UseHttpsRedirection();
 
 app.UseStaticFiles();
@@ -55,6 +65,84 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.MapRazorPages();
 app.MapHub<ChatHub>("/chatHub");
+
+app.MapGet("/admin/devices", (HttpRequest request, DeviceAuthService auth) =>
+{
+    var cfg = app.Configuration;
+
+    var sec = cfg.GetSection("Security");
+    if (sec.GetValue<bool>("AdminLanOnly"))
+    {
+        var ip = request.HttpContext.Connection.RemoteIpAddress;
+        if (ip is null || !IsPrivateIp(ip))
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+    }
+
+    if (!AdminAuthorized(request, cfg))
+        return Results.StatusCode(StatusCodes.Status401Unauthorized);
+
+    return Results.Ok(new { devices = auth.ListDeviceIds() });
+});
+
+app.MapPost("/admin/devices", async (HttpRequest request, DeviceAuthService auth) =>
+{
+    var cfg = app.Configuration;
+
+    var sec = cfg.GetSection("Security");
+    if (sec.GetValue<bool>("AdminLanOnly"))
+    {
+        var ip = request.HttpContext.Connection.RemoteIpAddress;
+        if (ip is null || !IsPrivateIp(ip))
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+    }
+
+    if (!AdminAuthorized(request, cfg))
+        return Results.StatusCode(StatusCodes.Status401Unauthorized);
+
+    // Accept either JSON or form
+    string? action = null;
+    string? deviceId = null;
+    string? deviceKey = null;
+
+    if (request.HasJsonContentType())
+    {
+        var body = await request.ReadFromJsonAsync<AdminDeviceRequest>();
+        action = body?.Action;
+        deviceId = body?.DeviceId;
+        deviceKey = body?.DeviceKey;
+    }
+    else
+    {
+        var form = await request.ReadFormAsync();
+        action = form["action"].ToString();
+        deviceId = form["deviceId"].ToString();
+        deviceKey = form["deviceKey"].ToString();
+    }
+
+    action = (action ?? "").Trim().ToLowerInvariant();
+    deviceId = (deviceId ?? "").Trim();
+
+    if (action is "add" or "replace")
+    {
+        deviceKey = (deviceKey ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(deviceId) || string.IsNullOrWhiteSpace(deviceKey))
+            return Results.BadRequest("deviceId and deviceKey are required for add/replace.");
+
+        auth.AddOrReplace(deviceId, deviceKey);
+        return Results.Ok(new { ok = true, action = "add", deviceId });
+    }
+
+    if (action is "revoke" or "delete" or "remove")
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+            return Results.BadRequest("deviceId is required for revoke.");
+
+        var changed = auth.Revoke(deviceId);
+        return Results.Ok(new { ok = true, action = "revoke", deviceId, removed = changed });
+    }
+
+    return Results.BadRequest("action must be add|replace|revoke");
+});
 
 app.MapPost("/upload", async (
     HttpRequest request,
@@ -118,6 +206,7 @@ app.MapPost("/upload", async (
     return Results.Ok(payload);
 });
 
+
 static string CleanName(string name)
 {
     foreach (var c in Path.GetInvalidFileNameChars())
@@ -139,6 +228,31 @@ static bool IsPrivateIp(IPAddress ip)
     if (bytes[0] == 192 && bytes[1] == 168) return true;
 
     return false;
+}
+
+static bool AdminAuthorized(HttpRequest request, IConfiguration cfg)
+{
+    var sec = cfg.GetSection("Security");
+    if (!sec.GetValue<bool>("AdminEnabled"))
+        return false;
+
+    var adminKey = sec.GetValue<string>("AdminKey") ?? "";
+    if (string.IsNullOrWhiteSpace(adminKey))
+        return false;
+
+    // header preferred
+    var provided = request.Headers["X-Admin-Key"].ToString();
+    if (string.IsNullOrWhiteSpace(provided))
+        return false;
+
+    return FixedTimeEqualsString(provided, adminKey);
+}
+static bool FixedTimeEqualsString(string a, string b)
+{
+    var aBytes = System.Text.Encoding.UTF8.GetBytes(a ?? "");
+    var bBytes = System.Text.Encoding.UTF8.GetBytes(b ?? "");
+    if (aBytes.Length != bBytes.Length) return false;
+    return CryptographicOperations.FixedTimeEquals(aBytes, bBytes);
 }
 
 
