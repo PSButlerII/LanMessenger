@@ -108,6 +108,11 @@
             .replaceAll("'", "&#039;");
     }
 
+    function isOnboarded() {
+      return !!getDeviceKey();
+    }
+
+
     const connection = new signalR.HubConnectionBuilder()
         .withUrl("/chatHub")
         .withAutomaticReconnect()
@@ -331,7 +336,7 @@
         alert(e.message || "Upload failed.");
       }
     }
-
+    
     sendFileBtn.addEventListener("click", sendFile);
 </script>
 
